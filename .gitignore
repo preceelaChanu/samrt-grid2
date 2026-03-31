@@ -39,3 +39,15 @@
 
 # debug information files
 *.dwo
+
+
+prompt.md
+
+
+# output files
+
+logs/
+output/
+keys/
+certs/
+build/

@@ -1,0 +1,86 @@
+{
+    "seal": {
+        "scheme": "CKKS",
+        "poly_modulus_degree": 8192,
+        "scale_bits": 40,
+        "coeff_modulus_bits": [60, 40, 40, 60],
+        "security_level": 128
+    },
+    "network": {
+        "kdc_host": "127.0.0.1",
+        "kdc_port": 5550,
+        "aggregator_host": "127.0.0.1",
+        "aggregator_port": 5560,
+        "control_center_host": "127.0.0.1",
+        "control_center_port": 5570,
+        "connection_timeout_ms": 5000,
+        "retry_attempts": 3,
+        "retry_delay_ms": 1000
+    },
+    "tls": {
+        "ca_cert": "certs/ca_cert.pem",
+        "ca_key": "certs/ca_key.pem",
+        "server_cert": "certs/server_cert.pem",
+        "server_key": "certs/server_key.pem",
+        "client_cert": "certs/client_cert.pem",
+        "client_key": "certs/client_key.pem",
+        "kdc_cert": "certs/kdc_cert.pem",
+        "kdc_key": "certs/kdc_key.pem",
+        "aggregator_cert": "certs/aggregator_cert.pem",
+        "aggregator_key": "certs/aggregator_key.pem",
+        "control_center_cert": "certs/control_center_cert.pem",
+        "control_center_key": "certs/control_center_key.pem"
+    },
+    "smart_meters": {
+        "count": 500,
+        "send_interval_ms": 1000,
+        "batch_size": 10,
+        "household_types": {
+            "LOW_CONSUMER": { "probability": 0.954, "base_kwh": 0.10, "variance": 0.05 },
+            "MEDIUM_CONSUMER": { "probability": 0.046, "base_kwh": 0.40, "variance": 0.15 },
+            "HIGH_CONSUMER": { "probability": 0.0, "base_kwh": 0.80, "variance": 0.30 },
+            "VARIABLE_BEHAVIOR": { "overlap_probability": 0.51, "variance_multiplier": 2.0 }
+        },
+        "consumption": {
+            "min_kwh": 0.0,
+            "max_kwh": 2.112,
+            "mean_kwh": 0.213,
+            "zero_reading_probability": 0.02,
+            "peak_hour": 19,
+            "low_hour": 4
+        }
+    },
+    "aggregator": {
+        "batch_size": 50,
+        "aggregation_interval_ms": 5000,
+        "max_concurrent_connections": 500
+    },
+    "control_center": {
+        "analytics_interval_ms": 10000,
+        "csv_output_dir": "output",
+        "report_file": "output/analytics_report.txt"
+    },
+    "metrics": {
+        "enabled": true,
+        "output_dir": "output",
+        "csv_files": {
+            "encryption": "encryption_metrics.csv",
+            "network": "network_metrics.csv",
+            "homomorphic": "homomorphic_metrics.csv",
+            "scalability": "scalability_metrics.csv",
+            "security": "security_metrics.csv"
+        }
+    },
+    "keys": {
+        "output_dir": "keys",
+        "public_key": "keys/public_key.seal",
+        "secret_key": "keys/secret_key.seal",
+        "relin_keys": "keys/relin_keys.seal",
+        "seal_params": "keys/seal_params.seal"
+    },
+    "logging": {
+        "level": "INFO",
+        "file": "logs/smartgrid.log",
+        "console": true
+    }
+}
