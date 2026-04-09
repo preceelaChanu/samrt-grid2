@@ -1,10 +1,15 @@
 // Control Center - receives aggregated ciphertexts, decrypts, performs analytics, exports CSV
+// Extended: Verifiable computation verification, theft detection reports, ToU billing summary
 #include "common/config.h"
 #include "common/logger.h"
 #include "common/crypto_engine.h"
 #include "common/network.h"
 #include "common/tls_context.h"
 #include "common/metrics.h"
+#include "common/zkp_engine.h"
+#include "common/verifiable_computation.h"
+#include "common/theft_detection.h"
+#include "common/tou_billing.h"
 
 #include <csignal>
 #include <atomic>
@@ -30,6 +35,8 @@ struct AggregatedBatch {
     double plaintext_sum_ref;
     double decrypted_sum;
     double mean;
+    bool aggregation_verified;
+    int theft_anomalies;
     std::string timestamp;
 };
 
@@ -77,6 +84,20 @@ int main(int argc, char* argv[]) {
 
         LOG_INFO("ControlCenter", "CKKS engine initialized with secret key");
 
+        // Initialize ZKP and verifiable computation for proof verification
+        smartgrid::ZKPEngine zkp;
+        int zkp_security = cfg.get().value("/zkp/security_bits"_json_pointer, 128);
+        zkp.init(zkp_security);
+
+        smartgrid::VerifiableComputation verifiable;
+        verifiable.init(zkp);
+        LOG_INFO("ControlCenter", "ZKP and verifiable computation initialized");
+
+        // Counters for security metrics
+        std::atomic<int> proofs_verified{0};
+        std::atomic<int> proofs_failed{0};
+        std::atomic<int> total_theft_anomalies{0};
+
         // Setup output directory
         auto& cc_cfg = cfg.get()["control_center"];
         std::string output_dir = cc_cfg["csv_output_dir"].get<std::string>();
@@ -111,19 +132,78 @@ int main(int argc, char* argv[]) {
 
                 if (msg_data.size() < 16) continue;
 
+                // Parse extended payload: [batch_id:4][num_readings:4][plaintext_sum:8]
+                //   [vc_len:4][vc_data][theft_len:4][theft_data][ct_data...]
+                size_t offset = 0;
                 uint32_t batch_id, num_readings;
                 double plaintext_sum_ref;
-                std::memcpy(&batch_id, msg_data.data(), 4);
-                std::memcpy(&num_readings, msg_data.data() + 4, 4);
+
+                std::memcpy(&batch_id, msg_data.data(), 4); offset += 4;
+                std::memcpy(&num_readings, msg_data.data() + 4, 4); offset += 4;
                 uint64_t ps_bits;
-                std::memcpy(&ps_bits, msg_data.data() + 8, 8);
+                std::memcpy(&ps_bits, msg_data.data() + 8, 8); offset += 8;
                 std::memcpy(&plaintext_sum_ref, &ps_bits, sizeof(double));
 
-                std::string ct_data = msg_data.substr(16);
+                // Parse verifiable computation proof
+                bool agg_verified = false;
+                if (offset + 4 <= msg_data.size()) {
+                    uint32_t vc_len;
+                    std::memcpy(&vc_len, msg_data.data() + offset, 4); offset += 4;
+                    if (vc_len > 0 && offset + vc_len <= msg_data.size()) {
+                        std::string vc_data = msg_data.substr(offset, vc_len); offset += vc_len;
+                        try {
+                            auto record = verifiable.deserialize_record(vc_data);
+                            auto verification = verifiable.verify_aggregation(record);
+                            agg_verified = verification.aggregation_valid;
+                            if (agg_verified) {
+                                proofs_verified++;
+                                LOG_INFO("ControlCenter", "Batch " + std::to_string(batch_id) +
+                                         " aggregation proof VERIFIED (" +
+                                         std::to_string(verification.total_verification_time_ms) + "ms)");
+                            } else {
+                                proofs_failed++;
+                                LOG_WARN("ControlCenter", "Batch " + std::to_string(batch_id) +
+                                         " aggregation proof FAILED");
+                            }
+                        } catch (const std::exception& e) {
+                            LOG_WARN("ControlCenter", "Failed to verify aggregation proof: " +
+                                     std::string(e.what()));
+                        }
+                    } else {
+                        offset += vc_len;
+                    }
+                }
+
+                // Parse theft detection data
+                int batch_theft_anomalies = 0;
+                if (offset + 4 <= msg_data.size()) {
+                    uint32_t td_len;
+                    std::memcpy(&td_len, msg_data.data() + offset, 4); offset += 4;
+                    if (td_len > 0 && offset + td_len <= msg_data.size()) {
+                        std::string td_data = msg_data.substr(offset, td_len); offset += td_len;
+                        // Parse anomaly count
+                        if (td_data.size() >= 4) {
+                            uint32_t anom_count;
+                            std::memcpy(&anom_count, td_data.data(), 4);
+                            batch_theft_anomalies = static_cast<int>(anom_count);
+                            total_theft_anomalies += batch_theft_anomalies;
+                            if (anom_count > 0) {
+                                LOG_WARN("ControlCenter", "Batch " + std::to_string(batch_id) +
+                                         ": " + std::to_string(anom_count) + " theft anomalies detected");
+                            }
+                        }
+                    } else {
+                        offset += td_len;
+                    }
+                }
+
+                // Remaining data is the aggregated ciphertext
+                std::string ct_data = msg_data.substr(offset);
 
                 LOG_INFO("ControlCenter", "Received batch " + std::to_string(batch_id) +
                          ": " + std::to_string(num_readings) + " readings, " +
-                         std::to_string(ct_data.size()) + " bytes");
+                         std::to_string(ct_data.size()) + " bytes ct, verified=" +
+                         std::string(agg_verified ? "yes" : "no"));
 
                 // Decrypt
                 smartgrid::ScopedTimer timer("encryption", "batch_decrypt",
@@ -147,7 +227,7 @@ int main(int argc, char* argv[]) {
 
                     AggregatedBatch batch_result{
                         batch_id, num_readings, plaintext_sum_ref,
-                        sum, mean, iso_now()
+                        sum, mean, agg_verified, batch_theft_anomalies, iso_now()
                     };
 
                     {
@@ -209,6 +289,22 @@ int main(int argc, char* argv[]) {
             LOG_INFO("ControlCenter", "Total readings: " + std::to_string(total_readings));
             LOG_INFO("ControlCenter", "Total energy: " + std::to_string(total_energy) + " kWh");
             LOG_INFO("ControlCenter", "Overall mean: " + std::to_string(overall_mean) + " kWh");
+
+            // Security metrics
+            int verified_count = 0;
+            int total_anomalies = 0;
+            for (auto& b : all_batches) {
+                if (b.aggregation_verified) verified_count++;
+                total_anomalies += b.theft_anomalies;
+            }
+            double verification_rate = static_cast<double>(verified_count) / all_batches.size() * 100.0;
+
+            LOG_INFO("ControlCenter", "=== Security Report ===");
+            LOG_INFO("ControlCenter", "Aggregation proofs verified: " + std::to_string(verified_count) +
+                     "/" + std::to_string(all_batches.size()) + " (" +
+                     std::to_string(verification_rate) + "%)");
+            LOG_INFO("ControlCenter", "Total theft anomalies: " + std::to_string(total_anomalies));
+            LOG_INFO("ControlCenter", "Overall mean: " + std::to_string(overall_mean) + " kWh");
             LOG_INFO("ControlCenter", "Batch mean range: [" + std::to_string(min_batch_mean) +
                      ", " + std::to_string(max_batch_mean) + "] kWh");
             LOG_INFO("ControlCenter", "Avg HE error: " + std::to_string(avg_error) + " kWh");
@@ -233,6 +329,12 @@ int main(int argc, char* argv[]) {
                 report << "  Min Batch Mean: " << min_batch_mean << " kWh\n";
                 report << "  Max Batch Mean: " << max_batch_mean << " kWh\n";
                 report << "  Avg HE Abs Error: " << avg_error << " kWh\n\n";
+                report << "Security:\n";
+                report << "  Aggregation Proofs Verified: " << verified_count << "/" << all_batches.size() << "\n";
+                report << "  Verification Rate: " << verification_rate << "%\n";
+                report << "  Total Theft Anomalies: " << total_anomalies << "\n";
+                report << "  ZKP Proofs Verified: " << proofs_verified.load() << "\n";
+                report << "  ZKP Proofs Failed: " << proofs_failed.load() << "\n\n";
                 report << "Batch Details:\n";
                 report << "  ID | Readings | Decrypted Sum | Reference Sum | Error | Mean\n";
                 report << "  ---|----------|---------------|---------------|-------|-----\n";
@@ -251,7 +353,8 @@ int main(int argc, char* argv[]) {
                 std::string csv_path = output_dir + "/batch_analytics.csv";
                 std::ofstream csv(csv_path);
                 csv << "timestamp,batch_id,num_readings,decrypted_sum_kwh,reference_sum_kwh,"
-                       "absolute_error_kwh,relative_error_pct,mean_kwh\n";
+                       "absolute_error_kwh,relative_error_pct,mean_kwh,"
+                       "aggregation_verified,theft_anomalies\n";
                 for (auto& b : all_batches) {
                     double error = std::abs(b.decrypted_sum - b.plaintext_sum_ref);
                     double rel = (b.plaintext_sum_ref != 0.0) ?
@@ -264,13 +367,18 @@ int main(int argc, char* argv[]) {
                         << b.plaintext_sum_ref << ","
                         << error << ","
                         << rel << ","
-                        << b.mean << "\n";
+                        << b.mean << ","
+                        << (b.aggregation_verified ? "true" : "false") << ","
+                        << b.theft_anomalies << "\n";
                 }
             }
         }
 
         LOG_INFO("ControlCenter", "Shutting down...");
         server.stop();
+
+        // Export security-related CSVs
+        verifiable.export_audit_csv(output_dir + "/verification_audit.csv");
 
         // Final CSV exports
         metrics.export_csv();

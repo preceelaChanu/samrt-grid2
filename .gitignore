@@ -42,6 +42,8 @@
 
 
 prompt.md
+prompt2.md
+requirements.md
 
 
 # output files
@@ -51,3 +53,8 @@ output/
 keys/
 certs/
 build/
+
+
+# basics
+
+demo.cpp

@@ -37,6 +37,10 @@ add_library(smartgrid_common STATIC
     src/common/crypto_engine.cpp
     src/common/network.cpp
     src/common/energy_simulator.cpp
+    src/common/zkp_engine.cpp
+    src/common/verifiable_computation.cpp
+    src/common/theft_detection.cpp
+    src/common/tou_billing.cpp
 )
 
 target_include_directories(smartgrid_common PUBLIC
@@ -74,6 +78,10 @@ target_link_libraries(aggregator PRIVATE smartgrid_common)
 # Control Center executable
 add_executable(control_center src/control_center_main.cpp)
 target_link_libraries(control_center PRIVATE smartgrid_common)
+
+# CKKS from-scratch demonstration (no SEAL dependency)
+add_executable(demo demo.cpp)
+target_link_libraries(demo PRIVATE Threads::Threads)
 
 # Install
 install(TARGETS key_generator cert_generator kdc smart_meter aggregator control_center

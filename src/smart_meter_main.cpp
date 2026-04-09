@@ -1,4 +1,5 @@
 // Smart Meter - simulates UK household energy data and sends CKKS-encrypted readings
+// Extended: ZKP range proofs, correctness proofs, and ToU time-slot metadata
 #include "common/config.h"
 #include "common/logger.h"
 #include "common/crypto_engine.h"
@@ -6,7 +7,10 @@
 #include "common/tls_context.h"
 #include "common/energy_simulator.h"
 #include "common/metrics.h"
+#include "common/zkp_engine.h"
+#include "common/tou_billing.h"
 
+#include <openssl/sha.h>
 #include <csignal>
 #include <atomic>
 #include <iostream>
@@ -66,7 +70,8 @@ static bool fetch_keys_from_kdc(smartgrid::TLSContext& tls_ctx,
 }
 
 static void meter_thread(int meter_id, smartgrid::CryptoEngine& crypto,
-                          smartgrid::TLSContext& client_tls) {
+                          smartgrid::TLSContext& client_tls,
+                          smartgrid::ZKPEngine& zkp) {
     auto& cfg = smartgrid::Config::instance();
     smartgrid::EnergySimulator sim;
     sim.init_from_config();
@@ -94,24 +99,65 @@ static void meter_thread(int meter_id, smartgrid::CryptoEngine& crypto,
     int send_interval = cfg.send_interval_ms();
     int readings_sent = 0;
 
+    // Get consumption range from config for ZKP range proofs
+    double min_kwh = cfg.get()["smart_meters"]["consumption"]["min_kwh"].get<double>();
+    double max_kwh = cfg.get()["smart_meters"]["consumption"]["max_kwh"].get<double>();
+
     while (g_running) {
         double reading = sim.generate_reading(profile);
 
         // Encrypt the reading
         auto ct = crypto.encrypt_single(reading);
 
-        // Serialize and send
+        // Serialize ciphertext
         std::string ct_data = crypto.serialize_ciphertext(ct);
 
-        // Prepend meter ID as metadata
+        // --- ZKP: Generate range proof (value ∈ [min_kwh, max_kwh]) ---
+        auto commitment = zkp.commit(reading);
+        auto range_proof = zkp.generate_range_proof(reading, min_kwh, max_kwh, commitment);
+        std::string range_proof_data = zkp.serialize_range_proof(range_proof);
+
+        // --- ZKP: Generate correctness proof (encrypted value matches commitment) ---
+        std::vector<uint8_t> ct_hash(SHA256_DIGEST_LENGTH);
+        SHA256(reinterpret_cast<const unsigned char*>(ct_data.data()),
+               ct_data.size(), ct_hash.data());
+        auto correctness_proof = zkp.generate_correctness_proof(reading, ct_hash);
+        std::string correctness_proof_data = zkp.serialize_correctness_proof(correctness_proof);
+
+        // --- ToU: Determine current time slot ---
+        int current_hour = sim.current_hour();
+        uint8_t tou_slot = static_cast<uint8_t>(current_hour); // Hour info for slot classification
+
+        // Build payload: [meter_id:4][reading:8][tou_hour:1][range_proof_len:4][range_proof]
+        //                [correctness_proof_len:4][correctness_proof][commitment_len:4][commitment][ct_data]
         std::string payload;
         {
             uint32_t mid = static_cast<uint32_t>(meter_id);
             payload.append(reinterpret_cast<const char*>(&mid), 4);
-            // Append plaintext reading for verification (in real system this wouldn't exist)
             uint64_t reading_bits;
             std::memcpy(&reading_bits, &reading, sizeof(double));
             payload.append(reinterpret_cast<const char*>(&reading_bits), 8);
+            payload.push_back(static_cast<char>(tou_slot));
+
+            // Range proof
+            uint32_t rp_len = static_cast<uint32_t>(range_proof_data.size());
+            payload.append(reinterpret_cast<const char*>(&rp_len), 4);
+            payload += range_proof_data;
+
+            // Correctness proof
+            uint32_t cp_len = static_cast<uint32_t>(correctness_proof_data.size());
+            payload.append(reinterpret_cast<const char*>(&cp_len), 4);
+            payload += correctness_proof_data;
+
+            // Commitment
+            uint32_t cm_len = static_cast<uint32_t>(commitment.data.size());
+            payload.append(reinterpret_cast<const char*>(&cm_len), 4);
+            payload.append(reinterpret_cast<const char*>(commitment.data.data()), cm_len);
+            uint32_t cb_len = static_cast<uint32_t>(commitment.blinding.size());
+            payload.append(reinterpret_cast<const char*>(&cb_len), 4);
+            payload.append(reinterpret_cast<const char*>(commitment.blinding.data()), cb_len);
+
+            // Ciphertext
             payload += ct_data;
         }
 
@@ -168,6 +214,12 @@ int main(int argc, char* argv[]) {
         int num_meters = cfg.smart_meter_count();
         LOG_INFO("SmartMeter", "Starting " + std::to_string(num_meters) + " smart meters");
 
+        // Initialize ZKP engine for range + correctness proofs
+        smartgrid::ZKPEngine zkp;
+        int zkp_security = cfg.get().value("/zkp/security_bits"_json_pointer, 128);
+        zkp.init(zkp_security);
+        LOG_INFO("SmartMeter", "ZKP engine initialized (" + std::to_string(zkp_security) + "-bit security)");
+
         // Setup TLS for KDC connection
         auto& tls_cfg = cfg.get()["tls"];
         smartgrid::TLSContext kdc_tls(smartgrid::TLSContext::Role::CLIENT);
@@ -215,7 +267,8 @@ int main(int argc, char* argv[]) {
         std::vector<std::thread> threads;
         threads.reserve(num_meters);
         for (int i = 0; i < num_meters; i++) {
-            threads.emplace_back(meter_thread, i, std::ref(crypto), std::ref(client_tls));
+            threads.emplace_back(meter_thread, i, std::ref(crypto), std::ref(client_tls),
+                                 std::ref(zkp));
             // Stagger starts to avoid thundering herd
             if (i % 50 == 49) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
