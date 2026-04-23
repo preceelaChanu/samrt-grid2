@@ -79,6 +79,7 @@ int main(int argc, char* argv[]) {
     try {
         std::signal(SIGINT, signal_handler);
         std::signal(SIGTERM, signal_handler);
+        std::signal(SIGPIPE, SIG_IGN);
 
         smartgrid::TLSContext::init_openssl();
 
@@ -300,11 +301,24 @@ int main(int argc, char* argv[]) {
             tls_cfg["ca_cert"].get<std::string>()
         );
 
-        // Connect to control center
+        // Connect to control center (with reconnection support)
         smartgrid::TLSClient cc_client(cc_tls);
-        LOG_INFO("Aggregator", "Connecting to Control Center...");
-        if (!cc_client.connect_with_retry(cfg.control_center_host(), cfg.control_center_port(),
-                cfg.retry_attempts(), cfg.retry_delay_ms(), cfg.connection_timeout_ms())) {
+        std::string cc_host = cfg.control_center_host();
+        int cc_port = cfg.control_center_port();
+        int cc_retry_attempts = cfg.retry_attempts();
+        int cc_retry_delay = cfg.retry_delay_ms();
+        int cc_timeout = cfg.connection_timeout_ms();
+
+        auto connect_to_cc = [&]() -> bool {
+            if (cc_client.is_connected()) {
+                cc_client.disconnect();
+            }
+            LOG_INFO("Aggregator", "Connecting to Control Center...");
+            return cc_client.connect_with_retry(cc_host, cc_port,
+                cc_retry_attempts, cc_retry_delay, cc_timeout);
+        };
+
+        if (!connect_to_cc()) {
             LOG_ERROR("Aggregator", "Cannot connect to Control Center");
             return 1;
         }
@@ -407,7 +421,23 @@ int main(int argc, char* argv[]) {
 
             if (!smartgrid::NetworkUtils::send_typed(cc_client.ssl(),
                     static_cast<uint8_t>(smartgrid::MsgType::AGGREGATED_DATA), payload)) {
-                LOG_WARN("Aggregator", "Failed to send aggregated data to Control Center");
+                LOG_WARN("Aggregator", "Failed to send batch " + std::to_string(batch_count) +
+                         " to Control Center, attempting reconnection...");
+                if (connect_to_cc()) {
+                    LOG_INFO("Aggregator", "Reconnected to Control Center");
+                    // Retry the send once after reconnection
+                    if (!smartgrid::NetworkUtils::send_typed(cc_client.ssl(),
+                            static_cast<uint8_t>(smartgrid::MsgType::AGGREGATED_DATA), payload)) {
+                        LOG_WARN("Aggregator", "Retry send also failed for batch " +
+                                 std::to_string(batch_count));
+                    } else {
+                        LOG_INFO("Aggregator", "Batch " + std::to_string(batch_count) +
+                                 " sent after reconnection: " + std::to_string(batch.size()) +
+                                 " readings, " + std::to_string(payload.size()) + " bytes");
+                    }
+                } else {
+                    LOG_ERROR("Aggregator", "Reconnection to Control Center failed");
+                }
             } else {
                 LOG_INFO("Aggregator", "Batch " + std::to_string(batch_count) +
                          " sent: " + std::to_string(batch.size()) + " readings, " +

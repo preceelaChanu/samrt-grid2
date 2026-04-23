@@ -61,10 +61,23 @@ void MetricsCollector::export_csv() const {
 
 void MetricsCollector::export_csv(const std::string& category, const std::string& filename) const {
     std::string path = output_dir_ + "/" + filename;
-    std::ofstream f(path);
+
+    // Check if file already exists and has content
+    bool write_header = true;
+    {
+        std::ifstream check(path);
+        if (check.good()) {
+            check.seekg(0, std::ios::end);
+            write_header = (check.tellg() == 0);
+        }
+    }
+
+    std::ofstream f(path, std::ios::app);
     if (!f.is_open()) return;
 
-    f << "timestamp,category,operation,value,unit,metadata\n";
+    if (write_header) {
+        f << "timestamp,category,operation,value,unit,metadata\n";
+    }
     for (auto& e : entries_) {
         if (e.category == category) {
             f << e.timestamp << ","

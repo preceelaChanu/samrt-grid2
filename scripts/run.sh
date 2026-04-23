@@ -14,6 +14,11 @@ cd "$PROJECT_DIR"
 # Create output directories
 mkdir -p output logs
 
+# Determine output directory from config and clear previous metrics
+OUTPUT_DIR=$(python3 -c "import json; c=json.load(open('$CONFIG')); print(c.get('metrics',{}).get('output_dir','output'))" 2>/dev/null || echo "output")
+mkdir -p "$OUTPUT_DIR"
+rm -f "$OUTPUT_DIR"/*.csv "$OUTPUT_DIR"/analytics_report.txt
+
 # Cleanup function
 cleanup() {
     echo ""

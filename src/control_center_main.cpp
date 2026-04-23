@@ -56,6 +56,7 @@ int main(int argc, char* argv[]) {
     try {
         std::signal(SIGINT, signal_handler);
         std::signal(SIGTERM, signal_handler);
+        std::signal(SIGPIPE, SIG_IGN);
 
         smartgrid::TLSContext::init_openssl();
 
@@ -382,14 +383,6 @@ int main(int argc, char* argv[]) {
 
         // Final CSV exports
         metrics.export_csv();
-
-        // Export specific CSV files as required
-        auto& csv_cfg = cfg.get()["metrics"]["csv_files"];
-        metrics.export_csv("encryption", csv_cfg["encryption"].get<std::string>());
-        metrics.export_csv("network", csv_cfg["network"].get<std::string>());
-        metrics.export_csv("homomorphic", csv_cfg["homomorphic"].get<std::string>());
-        metrics.export_csv("scalability", csv_cfg["scalability"].get<std::string>());
-        metrics.export_csv("security", csv_cfg["security"].get<std::string>());
 
         LOG_INFO("ControlCenter", "All metrics exported. Shutdown complete.");
 

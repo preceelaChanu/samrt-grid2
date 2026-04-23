@@ -197,6 +197,7 @@ int main(int argc, char* argv[]) {
     try {
         std::signal(SIGINT, signal_handler);
         std::signal(SIGTERM, signal_handler);
+        std::signal(SIGPIPE, SIG_IGN);
 
         smartgrid::TLSContext::init_openssl();
 

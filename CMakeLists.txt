@@ -83,6 +83,15 @@ target_link_libraries(control_center PRIVATE smartgrid_common)
 add_executable(demo demo.cpp)
 target_link_libraries(demo PRIVATE Threads::Threads)
 
+# HE Scheme Comparison benchmark (CKKS vs BFV vs BGV vs Paillier)
+add_executable(scheme_comparison src/scheme_comparison.cpp)
+target_link_libraries(scheme_comparison PRIVATE
+    SEAL::seal
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    Threads::Threads
+)
+
 # Install
 install(TARGETS key_generator cert_generator kdc smart_meter aggregator control_center
     RUNTIME DESTINATION bin
